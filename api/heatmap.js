@@ -1,6 +1,7 @@
 // api/heatmap.js
 import { Client } from '@notionhq/client';
-import { format, eachDayOfInterval, startOfYear } from 'date-fns';
+import { format, eachDayOfInterval, startOfYear, getMonth, getDay } from 'date-fns';
+import { enUS } from 'date-fns/locale';
 
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const DATABASE_ID = process.env.DATABASE_ID;
@@ -10,28 +11,18 @@ export default async function handler(req, res) {
   try {
     const notion = new Client({ auth: NOTION_TOKEN });
 
-    // 查询数据库
     const response = await notion.databases.query({
       database_id: DATABASE_ID,
-      filter_property: DATE_PROPERTY_NAME,
-      sorts: [
-        {
-          property: DATE_PROPERTY_NAME,
-          direction: 'ascending'
-        }
-      ]
     });
 
-    // 提取日期
     const dates = [];
     for (const page of response.results) {
       const dateProp = page.properties[DATE_PROPERTY_NAME];
-      if (dateProp && dateProp.date && dateProp.date.start) {
+      if (dateProp?.date?.start) {
         dates.push(new Date(dateProp.date.start));
       }
     }
 
-    // 统计每日次数
     const today = new Date();
     const start = startOfYear(today);
     const allDays = eachDayOfInterval({ start, end: today });
@@ -42,14 +33,42 @@ export default async function handler(req, res) {
       countMap.set(key, countMap.get(key) + 1);
     });
 
-    // 生成 SVG
+    // 计算总条数
+    const totalEntries = dates.length;
+
+    // SVG 参数
     const cellSize = 16;
     const spacing = 2;
-    const width = 53 * (cellSize + spacing) + spacing;
-    const height = 8 * (cellSize + spacing) + spacing;
+    const labelWidth = 20;   // 左侧星期标签宽度
+    const labelHeight = 20;  // 顶部月份标签高度
+    const width = labelWidth + 53 * (cellSize + spacing) + spacing;
+    const height = labelHeight + 8 * (cellSize + spacing) + spacing + 20; // +20 用于底部统计
 
-    let svgContent = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" style="background:#fff">`;
+    let svgContent = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 10px;">`;
 
+    // === 左侧：星期标签 ===
+    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    for (let i = 0; i < 7; i++) {
+      const y = labelHeight + spacing + i * (cellSize + spacing) + cellSize / 2;
+      svgContent += `<text x="${labelWidth - 4}" y="${y}" text-anchor="end" dominant-baseline="middle" fill="#666">${weekdays[i]}</text>`;
+    }
+
+    // === 顶部：月份标签 ===
+    let lastMonth = -1;
+    for (let week = 0; week < 53; week++) {
+      const dayIndex = week * 7;
+      if (dayIndex >= allDays.length) break;
+      const d = allDays[dayIndex];
+      const month = getMonth(d);
+      if (month !== lastMonth) {
+        const x = labelWidth + spacing + week * (cellSize + spacing);
+        const monthName = format(d, 'MMM', { locale: enUS }); // Jan, Feb...
+        svgContent += `<text x="${x}" y="${labelHeight - 4}" fill="#666">${monthName}</text>`;
+        lastMonth = month;
+      }
+    }
+
+    // === 热力图格子 ===
     const getColor = (count) => {
       if (count === 0) return '#ebedf0';
       if (count < 3) return '#9be9a8';
@@ -65,13 +84,17 @@ export default async function handler(req, res) {
         const d = allDays[dayIndex];
         const key = format(d, 'yyyy-MM-dd');
         const count = countMap.get(key) || 0;
-        const x = spacing + week * (cellSize + spacing);
-        const y = spacing + weekday * (cellSize + spacing);
+        const x = labelWidth + spacing + week * (cellSize + spacing);
+        const y = labelHeight + spacing + weekday * (cellSize + spacing);
         const color = getColor(count);
         svgContent += `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" fill="${color}" title="${key}: ${count} 条"></rect>`;
         dayIndex++;
       }
     }
+
+    // === 底部：统计信息 ===
+    const statsY = height - 5;
+    svgContent += `<text x="${labelWidth}" y="${statsY}" fill="#333">Total: ${totalEntries} entries</text>`;
 
     svgContent += `</svg>`;
 

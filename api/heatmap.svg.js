@@ -1,131 +1,141 @@
 // api/heatmap.svg.js
 import { Client } from '@notionhq/client';
-import { format, eachDayOfInterval, startOfYear, getMonth } from 'date-fns';
-import { enUS } from 'date-fns/locale';
 
-// 从环境变量读取配置
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const DATABASE_ID = process.env.DATABASE_ID;
-const DATE_PROPERTY_NAME = '新闻日期'; // ←←← 请务必修改为您的 Notion 数据库中【日期属性的实际名称】！
+const DATE_PROPERTY_NAME = '新闻日期'; // ← 请根据实际修改
+
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function getColorByCount(count) {
+  const colors = ['#ebedf0', '#c6e48b', '#7bc96f', '#239a3b', '#196127'];
+  if (count === 0) return colors[0];
+  if (count === 1) return colors[1];
+  if (count <= 3) return colors[2];
+  if (count <= 6) return colors[3];
+  return colors[4];
+}
+
+function generateHeatmapSVG(counts, year) {
+  const cellSize = 14;
+  const spacing = 4;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const daysInMonth = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30,
+                       31, 31, 30, 31, 30, 31];
+
+  const colWidth = cellSize + spacing;
+  const rowHeight = cellSize + spacing;
+
+  const leftMargin = 50;
+  const topMargin = 20;
+  const totalColumns = 12 * 5; // 12个月 × 最多5周
+  const svgWidth = leftMargin + totalColumns * colWidth;
+  const svgHeight = topMargin + 7 * rowHeight + 20; // +20 用于底部统计
+
+  let svg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;">\n`;
+
+  // === 星期标签（左侧）===
+  const weekdays = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  for (let w = 0; w < 7; w++) {
+    const y = topMargin + w * rowHeight + cellSize / 2 + 3;
+    svg += `  <text x="10" y="${y}" font-size="9" fill="#999" text-anchor="start">${weekdays[w]}</text>\n`;
+  }
+
+  // === 月份标签 + 单元格 ===
+  let globalColIndex = 0;
+  for (let month = 0; month < 12; month++) {
+    const firstDayOfWeek = new Date(year, month, 1).getDay(); // 0=Sun
+    const totalDays = daysInMonth[month];
+    const weeksNeeded = Math.ceil((firstDayOfWeek + totalDays) / 7);
+    const actualWeeks = Math.min(weeksNeeded, 5);
+
+    // 月份标签（居中）
+    if (actualWeeks > 0) {
+      const midCol = globalColIndex + Math.floor(actualWeeks / 2);
+      const x = leftMargin + midCol * colWidth + cellSize / 2;
+      svg += `  <text x="${x}" y="14" font-size="10" fill="#586069" text-anchor="middle">${months[month]}</text>\n`;
+    }
+
+    // 渲染该月的每一周
+    for (let week = 0; week < actualWeeks; week++) {
+      for (let weekday = 0; weekday < 7; weekday++) {
+        const dayOfMonth = week * 7 + weekday - firstDayOfWeek + 1;
+        const x = leftMargin + globalColIndex * colWidth;
+        const y = topMargin + weekday * rowHeight;
+
+        if (dayOfMonth >= 1 && dayOfMonth <= totalDays) {
+          const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(dayOfMonth).padStart(2, '0')}`;
+          const count = counts[dateStr] || 0;
+          const color = getColorByCount(count);
+          svg += `  <rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="2" ry="2" fill="${color}">\n`;
+          svg += `    <title>${dateStr}: ${count} 条</title>\n`;
+          svg += `  </rect>\n`;
+        } else {
+          // 空白单元格（透明）
+          svg += `  <rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" fill="none"></rect>\n`;
+        }
+      }
+      globalColIndex++;
+    }
+
+    // 补齐到5周（空白）
+    for (let pad = actualWeeks; pad < 5; pad++) {
+      for (let weekday = 0; weekday < 7; weekday++) {
+        const x = leftMargin + globalColIndex * colWidth;
+        const y = topMargin + weekday * rowHeight;
+        svg += `  <rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" fill="none"></rect>\n`;
+      }
+      globalColIndex++;
+    }
+  }
+
+  // === 底部统计 ===
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const statsY = svgHeight - 5;
+  svg += `  <text x="${leftMargin}" y="${statsY}" font-size="12" fill="#333">Total: ${total} entries in ${year}</text>\n`;
+
+  svg += '</svg>';
+  return svg;
+}
 
 export default async function handler(req, res) {
   try {
-    // 初始化 Notion 客户端
     const notion = new Client({ auth: NOTION_TOKEN });
-
-    // 查询数据库所有页面
     const response = await notion.databases.query({
       database_id: DATABASE_ID,
+      filter: {
+        property: DATE_PROPERTY_NAME,
+        date: { is_not_empty: true }
+      },
+      sorts: [
+        { property: DATE_PROPERTY_NAME, direction: 'ascending' }
+      ]
     });
 
-    // 提取有效日期
-    const dates = [];
-    for (const page of response.results) {
-      const dateProp = page.properties[DATE_PROPERTY_NAME];
-      if (dateProp?.date?.start) {
-        dates.push(new Date(dateProp.date.start));
+    const counts = {};
+    for (const record of response.results) {
+      const dateProp = record.properties?.[DATE_PROPERTY_NAME]?.date;
+      if (dateProp && dateProp.start) {
+        const dateStr = dateProp.start.split('T')[0];
+        counts[dateStr] = (counts[dateStr] || 0) + 1;
       }
     }
 
-    const totalEntries = dates.length;
+    const year = new Date().getFullYear();
+    const svg = generateHeatmapSVG(counts, year);
 
-    // 构建全年日期范围（从今年1月1日到今天）
-    const today = new Date();
-    const start = startOfYear(today);
-    const allDays = eachDayOfInterval({ start, end: today });
-
-    // 统计每日记录数
-    const countMap = new Map();
-    allDays.forEach(d => {
-      const key = format(d, 'yyyy-MM-dd');
-      countMap.set(key, 0);
-    });
-    dates.forEach(d => {
-      const key = format(d, 'yyyy-MM-dd');
-      if (countMap.has(key)) {
-        countMap.set(key, countMap.get(key) + 1);
-      }
-    });
-
-    // SVG 布局参数
-    const cellSize = 16;
-    const spacing = 2;
-    const labelWidth = 24;   // 左侧星期标签区域宽度
-    const labelHeight = 20;  // 顶部月份标签区域高度
-    const statsHeight = 20;  // 底部统计区域高度
-
-    const cols = 53; // 最多53周
-    const rows = 7;  // 7天（Sun-Sat）
-
-    const width = labelWidth + cols * (cellSize + spacing) + spacing;
-    const height = labelHeight + rows * (cellSize + spacing) + spacing + statsHeight;
-
-    // 开始构建 SVG
-    let svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: #fff;">\n`;
-
-    // === 左侧：星期标签 ===
-    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    for (let i = 0; i < weekdays.length; i++) {
-      const y = labelHeight + spacing + i * (cellSize + spacing) + cellSize / 2;
-      svg += `  <text x="${labelWidth - 4}" y="${y}" text-anchor="end" dominant-baseline="middle" fill="#666" font-size="10">${weekdays[i]}</text>\n`;
-    }
-
-    // === 顶部：月份标签 ===
-    let lastMonth = -1;
-    for (let week = 0; week < cols; week++) {
-      const dayIndex = week * 7;
-      if (dayIndex >= allDays.length) break;
-      const d = allDays[dayIndex];
-      const month = getMonth(d);
-      if (month !== lastMonth) {
-        const x = labelWidth + spacing + week * (cellSize + spacing);
-        const monthAbbr = format(d, 'MMM', { locale: enUS }); // Jan, Feb...
-        svg += `  <text x="${x}" y="${labelHeight - 4}" fill="#666" font-size="10">${monthAbbr}</text>\n`;
-        lastMonth = month;
-      }
-    }
-
-    // === 热力图格子 ===
-    const getColor = (count) => {
-      if (count === 0) return '#ebedf0';
-      if (count < 3) return '#9be9a8';
-      if (count < 6) return '#40c463';
-      if (count < 10) return '#30a14e';
-      return '#216e39';
-    };
-
-    let dayIndex = 0;
-    for (let week = 0; week < cols; week++) {
-      for (let weekday = 0; weekday < rows; weekday++) {
-        if (dayIndex >= allDays.length) break;
-        const d = allDays[dayIndex];
-        const key = format(d, 'yyyy-MM-dd');
-        const count = countMap.get(key) || 0;
-        const x = labelWidth + spacing + week * (cellSize + spacing);
-        const y = labelHeight + spacing + weekday * (cellSize + spacing);
-        const color = getColor(count);
-        svg += `  <rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" fill="${color}" title="${key}: ${count} 条" />\n`;
-        dayIndex++;
-      }
-    }
-
-    // === 底部：统计信息 ===
-    const statsY = height - 5;
-    svg += `  <text x="${labelWidth}" y="${statsY}" fill="#333" font-size="10">Total: ${totalEntries} entries</text>\n`;
-
-    svg += '</svg>';
-
-    // 设置正确响应头
     res.setHeader('Content-Type', 'image/svg+xml');
-    res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate'); // 缓存1小时
+    res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
     res.status(200).send(svg);
 
   } catch (error) {
-    console.error('Heatmap generation error:', error);
-    // 即使出错，也返回一个简单的 SVG 错误图（避免 Notion 显示破图）
-    const errorSvg = `<svg width="300" height="100" xmlns="http://www.w3.org/2000/svg">
-      <text x="10" y="20" fill="red" font-family="monospace">Error: Failed to load heatmap</text>
-      <text x="10" y="40" fill="red" font-family="monospace">Check Vercel logs for details</text>
+    console.error('Error:', error);
+    const errorSvg = `<svg width="400" height="100" xmlns="http://www.w3.org/2000/svg">
+      <text x="10" y="20" fill="red" font-family="monospace">Heatmap Error</text>
+      <text x="10" y="40" fill="red" font-family="monospace">${error.message}</text>
     </svg>`;
     res.setHeader('Content-Type', 'image/svg+xml');
     res.status(500).send(errorSvg);

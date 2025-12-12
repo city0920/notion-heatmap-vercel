@@ -1,39 +1,33 @@
 // api/heatmap.js
-import { NotionAPI } from 'notion-client';
-import { format, subDays, eachDayOfInterval, startOfYear, isSameDay } from 'date-fns';
+import { Client } from '@notionhq/client';
+import { format, eachDayOfInterval, startOfYear } from 'date-fns';
 
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const DATABASE_ID = process.env.DATABASE_ID;
-const DATE_PROPERTY_NAME = '新闻日期'; // ←←← 请改成您数据库中的实际日期列名！
+const DATE_PROPERTY_NAME = '新闻日期'; // ← 改成您的实际列名！
 
 export default async function handler(req, res) {
   try {
-    const notion = new NotionAPI({ authToken: NOTION_TOKEN });
-    
-    // 获取数据库所有记录
-    const records = await notion.queryCollection({
-      collectionId: DATABASE_ID,
-      collectionViewId: DATABASE_ID,
-      loader: {
-        type: 'table',
-        limit: 1000,
-        searchQuery: '',
-        userLocale: 'en',
-        userTimeZone: 'Asia/Shanghai'
-      }
+    const notion = new Client({ auth: NOTION_TOKEN });
+
+    // 查询数据库
+    const response = await notion.databases.query({
+      database_id: DATABASE_ID,
+      filter_property: DATE_PROPERTY_NAME,
+      sorts: [
+        {
+          property: DATE_PROPERTY_NAME,
+          direction: 'ascending'
+        }
+      ]
     });
 
-    // 提取所有日期
+    // 提取日期
     const dates = [];
-    for (const block of Object.values(records.recordMap.block || {})) {
-      if (block?.value?.type === 'page') {
-        const props = block.value.properties;
-        if (props && props[DATE_PROPERTY_NAME]) {
-          const dateStr = props[DATE_PROPERTY_NAME][0][1]?.start_date;
-          if (dateStr) {
-            dates.push(new Date(dateStr));
-          }
-        }
+    for (const page of response.results) {
+      const dateProp = page.properties[DATE_PROPERTY_NAME];
+      if (dateProp && dateProp.date && dateProp.date.start) {
+        dates.push(new Date(dateProp.date.start));
       }
     }
 
@@ -45,9 +39,7 @@ export default async function handler(req, res) {
     allDays.forEach(d => countMap.set(format(d, 'yyyy-MM-dd'), 0));
     dates.forEach(d => {
       const key = format(d, 'yyyy-MM-dd');
-      if (countMap.has(key)) {
-        countMap.set(key, countMap.get(key) + 1);
-      }
+      countMap.set(key, countMap.get(key) + 1);
     });
 
     // 生成 SVG

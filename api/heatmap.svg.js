@@ -101,22 +101,43 @@ function generateHeatmapSVG(counts, year) {
   return svg;
 }
 
-export default async function handler(req, res) {
-  try {
-    const notion = new Client({ auth: NOTION_TOKEN });
+// ✅ 新增：分页获取所有记录
+async function fetchAllRecords(notion, databaseId, datePropName) {
+  let records = [];
+  let hasMore = true;
+  let nextPageCursor = undefined;
+
+  while (hasMore) {
     const response = await notion.databases.query({
-      database_id: DATABASE_ID,
+      database_id: databaseId,
       filter: {
-        property: DATE_PROPERTY_NAME,
+        property: datePropName,
         date: { is_not_empty: true }
       },
       sorts: [
-        { property: DATE_PROPERTY_NAME, direction: 'ascending' }
-      ]
+        { property: datePropName, direction: 'ascending' }
+      ],
+      start_cursor: nextPageCursor,
+      page_size: 100 // Notion API 最大值
     });
 
+    records.push(...response.results);
+    hasMore = response.has_more;
+    nextPageCursor = response.next_cursor;
+  }
+
+  return records;
+}
+
+export default async function handler(req, res) {
+  try {
+    const notion = new Client({ auth: NOTION_TOKEN });
+
+    // ✅ 使用分页函数获取全部记录
+    const allRecords = await fetchAllRecords(notion, DATABASE_ID, DATE_PROPERTY_NAME);
+
     const counts = {};
-    for (const record of response.results) {
+    for (const record of allRecords) {
       const dateProp = record.properties?.[DATE_PROPERTY_NAME]?.date;
       if (dateProp && dateProp.start) {
         const dateStr = dateProp.start.split('T')[0];

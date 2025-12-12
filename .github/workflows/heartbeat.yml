@@ -1,0 +1,24 @@
+# .github/workflows/heartbeat.yml
+name: Heatmap Heartbeat
+
+on:
+  schedule:
+    # 每天 UTC 时间 08:00 执行（北京时间 16:00）
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  ping-heatmap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Notion Heatmap
+        run: |
+          echo "Pinging heatmap to keep Vercel active..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://notion-heatmap-vercel.vercel.app/api/heatmap.svg?t=$(date +%Y%m%d%H%M)")
+          if [ "$response" = "200" ]; then
+            echo "✅ Success: Heatmap is online"
+          else
+            echo "❌ Failed: HTTP $response"
+            exit 1
+          fi
